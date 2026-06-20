@@ -1,0 +1,475 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>つくも日誌</title>
+
+<!-- Firebase -->
+<script type="module">
+  import { initializeApp } from "https://www.gstatic.com/firebasejs/10.12.0/firebase-app.js";
+  import { getFirestore, collection, addDoc, getDocs, deleteDoc, doc, orderBy, query }
+    from "https://www.gstatic.com/firebasejs/10.12.0/firebase-firestore.js";
+
+  const firebaseConfig = {
+    apiKey: "AIzaSyAJeCKnP1IzWpK0jOGD-BBv7Cnxs34urFQ",
+    authDomain: "tsukumologs.firebaseapp.com",
+    projectId: "tsukumologs",
+    storageBucket: "tsukumologs.firebasestorage.app",
+    messagingSenderId: "861852513313",
+    appId: "1:861852513313:web:2bb4833fb1ad341726df60"
+  };
+
+  const app = initializeApp(firebaseConfig);
+  const db = getFirestore(app);
+
+  const CATEGORIES = {
+    food:     { label: "ごはん",       emoji: "🍚", color: "#f59e0b" },
+    poop:     { label: "うんち",       emoji: "💩", color: "#92400e" },
+    walk:     { label: "さんぽ",       emoji: "🐾", color: "#10b981" },
+    medicine: { label: "フィラリア薬", emoji: "💊", color: "#6366f1" },
+  };
+
+  let currentDate = new Date();
+  let selectedDate = toDateStr(new Date());
+  let records = {};
+
+  function toDateStr(d) {
+    return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')}`;
+  }
+  function toDisplayTime(isoStr) {
+    const d = new Date(isoStr);
+    return `${String(d.getHours()).padStart(2,'0')}:${String(d.getMinutes()).padStart(2,'0')}`;
+  }
+
+  async function loadAll() {
+    showCalLoading(true);
+    try {
+      const snap = await getDocs(query(collection(db, "tsukumo_logs"), orderBy("timestamp", "asc")));
+      records = {};
+      snap.forEach(d => {
+        const data = { id: d.id, ...d.data() };
+        const dateKey = data.timestamp.slice(0, 10);
+        if (!records[dateKey]) records[dateKey] = [];
+        records[dateKey].push(data);
+      });
+    } catch(e) { console.error(e); }
+    showCalLoading(false);
+    renderCalendar();
+    renderDayLog(selectedDate);
+  }
+
+  function showCalLoading(on) {
+    document.getElementById("cal-loading").style.display = on ? "block" : "none";
+    document.getElementById("cal-grid").style.opacity = on ? "0.3" : "1";
+  }
+
+  async function addRecord(category) {
+    const nowIso = new Date().toISOString();
+    const timeStr = toDisplayTime(nowIso);
+    const dateKey = nowIso.slice(0, 10);
+    const cat = CATEGORIES[category];
+    const tempId = "temp_" + Date.now();
+
+    if (!records[dateKey]) records[dateKey] = [];
+    records[dateKey].push({ id: tempId, category, timestamp: nowIso });
+    renderCalendar();
+    renderDayLog(selectedDate);
+    showBanner(`${timeStr} に「${cat.emoji} ${cat.label}」を登録しました`, cat.color);
+
+    try {
+      const ref = await addDoc(collection(db, "tsukumo_logs"), { category, timestamp: nowIso });
+      const entry = records[dateKey].find(r => r.id === tempId);
+      if (entry) entry.id = ref.id;
+    } catch(e) {
+      records[dateKey] = records[dateKey].filter(r => r.id !== tempId);
+      renderCalendar();
+      renderDayLog(selectedDate);
+      showToast("⚠️ 保存に失敗しました");
+    }
+  }
+
+  async function deleteRecord(id, dateKey, category) {
+    records[dateKey] = records[dateKey].filter(r => r.id !== id);
+    renderCalendar();
+    renderDayLog(selectedDate);
+    showToast(`${CATEGORIES[category].emoji} 削除しました`);
+    try { await deleteDoc(doc(db, "tsukumo_logs", id)); } catch(e) { console.error(e); }
+  }
+
+  // ── 日メモ（フリーテキスト）──────────────────────
+  let dayMemos = {};
+  let memoSaveTimer = null;
+
+  async function loadDayMemos() {
+    try {
+      const snap = await getDocs(collection(db, "tsukumo_day_memos"));
+      snap.forEach(d => { dayMemos[d.id] = d.data().text || ""; });
+    } catch(e) { console.error(e); }
+  }
+
+  function renderDayMemo(dateStr) {
+    const area = document.getElementById("day-memo-area");
+    if (!area) return;
+    area.value = dayMemos[dateStr] || "";
+    area.oninput = () => onDayMemoInput(dateStr);
+    document.getElementById("memo-save-status").textContent = "";
+  }
+
+  function onDayMemoInput(dateStr) {
+    const text = document.getElementById("day-memo-area").value;
+    dayMemos[dateStr] = text;
+    const status = document.getElementById("memo-save-status");
+    status.textContent = "…";
+    if (memoSaveTimer) clearTimeout(memoSaveTimer);
+    memoSaveTimer = setTimeout(async () => {
+      try {
+        const { setDoc, doc: fsDoc } = await import("https://www.gstatic.com/firebasejs/10.12.0/firebase-firestore.js");
+        await setDoc(fsDoc(db, "tsukumo_day_memos", dateStr), { text });
+        status.textContent = "✓ 保存";
+        setTimeout(() => { status.textContent = ""; }, 1500);
+      } catch(e) { status.textContent = "⚠️ 失敗"; }
+    }, 1000);
+  }
+
+  async function handleUrlParams() {
+    const params = new URLSearchParams(location.search);
+    const action = params.get("action");
+    if (action && CATEGORIES[action]) {
+      await addRecord(action);
+      history.replaceState({}, "", location.pathname);
+    }
+  }
+
+  function renderCalendar() {
+    const year = currentDate.getFullYear();
+    const month = currentDate.getMonth();
+    const firstDay = new Date(year, month, 1).getDay();
+    const daysInMonth = new Date(year, month+1, 0).getDate();
+    const today = toDateStr(new Date());
+    document.getElementById("cal-title").textContent = `${year}年${month+1}月`;
+
+    const grid = document.getElementById("cal-grid");
+    grid.innerHTML = "";
+    ["日","月","火","水","木","金","土"].forEach((d, i) => {
+      const el = document.createElement("div");
+      el.className = "cal-dow";
+      el.textContent = d;
+      el.style.color = i === 0 ? "#ef4444" : i === 6 ? "#3b82f6" : "#888";
+      grid.appendChild(el);
+    });
+    for (let i = 0; i < firstDay; i++) grid.appendChild(document.createElement("div"));
+
+    for (let d = 1; d <= daysInMonth; d++) {
+      const dateStr = `${year}-${String(month+1).padStart(2,'0')}-${String(d).padStart(2,'0')}`;
+      const dayRecs = records[dateStr] || [];
+      const el = document.createElement("div");
+      el.className = "cal-day" +
+        (dateStr === today ? " today" : "") +
+        (dateStr === selectedDate ? " selected" : "");
+      const dow = (firstDay + d - 1) % 7;
+      const numColor = dow === 0 ? "#ef4444" : dow === 6 ? "#3b82f6" : "#222";
+      el.innerHTML = `<span style="color:${numColor};font-weight:${dateStr===today?'700':'400'}">${d}</span>`;
+
+      if (dayRecs.length > 0) {
+        const amRecs = dayRecs.filter(r => new Date(r.timestamp).getHours() < 12);
+        const pmRecs = dayRecs.filter(r => new Date(r.timestamp).getHours() >= 12);
+        const wrap = document.createElement("div");
+        wrap.style.cssText = "display:flex;flex-direction:column;gap:1px;margin-top:2px;align-items:center";
+        [amRecs, pmRecs].forEach(group => {
+          const row = document.createElement("div");
+          row.style.cssText = "display:flex;gap:1px;justify-content:center;min-height:5px";
+          const cats = [...new Set(group.map(r => r.category))];
+          cats.forEach(c => {
+            const dot = document.createElement("span");
+            dot.style.cssText = `width:5px;height:5px;border-radius:50%;background:${CATEGORIES[c]?.color||'#ccc'};display:inline-block;flex-shrink:0`;
+            row.appendChild(dot);
+          });
+          wrap.appendChild(row);
+        });
+        el.appendChild(wrap);
+      }
+
+      el.onclick = () => { selectedDate = dateStr; renderCalendar(); renderDayLog(dateStr); };
+      grid.appendChild(el);
+    }
+  }
+
+  function renderDayLog(dateStr) {
+    const d = new Date(dateStr + "T00:00:00");
+    document.getElementById("day-label").textContent =
+      `${d.getMonth()+1}月${d.getDate()}日（${"日月火水木金土"[d.getDay()]}）`;
+
+    const dayRecs = (records[dateStr] || []).slice().sort((a,b) => a.timestamp.localeCompare(b.timestamp));
+    const list = document.getElementById("day-list");
+    if (dayRecs.length === 0) {
+      list.innerHTML = `<div class="empty-day">この日の記録はまだないよ🐾</div>`;
+    } else {
+      list.innerHTML = "";
+      dayRecs.forEach(r => {
+        const cat = CATEGORIES[r.category];
+        const el = document.createElement("div");
+        el.className = "log-item";
+        el.innerHTML = `
+          <div class="log-dot" style="background:${cat.color}"></div>
+          <div class="log-info">
+            <span class="log-emoji">${cat.emoji}</span>
+            <span class="log-label">${cat.label}</span>
+            <span class="log-time">${toDisplayTime(r.timestamp)}</span>
+          </div>
+          <button class="del-btn" onclick="window._deleteRecord('${r.id}','${dateStr}','${r.category}')">✕</button>
+        `;
+        list.appendChild(el);
+      });
+    }
+    renderDayMemo(dateStr);
+  }
+
+  let bannerTimer = null;
+  function showBanner(msg, color) {
+    const b = document.getElementById("reg-banner");
+    b.textContent = msg;
+    b.style.borderLeft = `5px solid ${color}`;
+    b.style.display = "flex";
+    b.classList.remove("banner-hide");
+    void b.offsetWidth;
+    b.classList.add("banner-show");
+    if (bannerTimer) clearTimeout(bannerTimer);
+    bannerTimer = setTimeout(() => {
+      b.classList.remove("banner-show");
+      b.classList.add("banner-hide");
+      setTimeout(() => { b.style.display = "none"; b.classList.remove("banner-hide"); }, 400);
+    }, 3500);
+  }
+  function showToast(msg) {
+    const t = document.getElementById("toast");
+    t.textContent = msg;
+    t.classList.add("show");
+    setTimeout(() => t.classList.remove("show"), 2000);
+  }
+
+  window._addRecord = addRecord;
+  window._deleteRecord = deleteRecord;
+  window._prevMonth = () => {
+    currentDate = new Date(currentDate.getFullYear(), currentDate.getMonth()-1, 1);
+    renderCalendar(); renderDayLog(selectedDate);
+  };
+  window._nextMonth = () => {
+    currentDate = new Date(currentDate.getFullYear(), currentDate.getMonth()+1, 1);
+    renderCalendar(); renderDayLog(selectedDate);
+  };
+
+  await handleUrlParams();
+  await Promise.all([loadAll(), loadDayMemos()]);
+</script>
+
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    font-family: 'Hiragino Kaku Gothic ProN', 'Meiryo', sans-serif;
+    background: #fdf8f3;
+    min-height: 100vh;
+    color: #222;
+  }
+
+  /* ヘッダー */
+  header {
+    background: #fff;
+    border-bottom: 2px solid #f5e6d3;
+    padding: 14px 16px;
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    position: sticky;
+    top: 0;
+    z-index: 10;
+  }
+  .header-icon { font-size: 28px; }
+  .header-title { font-size: 18px; font-weight: 700; color: #4a2c0a; }
+  .header-sub { font-size: 11px; color: #a07850; margin-top: 1px; }
+
+  /* ボタングリッド */
+  .btn-grid {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 10px;
+    padding: 16px;
+  }
+  .rec-btn {
+    border: none;
+    border-radius: 16px;
+    padding: 18px 12px;
+    font-size: 15px;
+    font-weight: 700;
+    cursor: pointer;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 8px;
+    color: #fff;
+    box-shadow: 0 3px 10px rgba(0,0,0,0.12);
+    transition: transform 0.1s, box-shadow 0.1s;
+    font-family: inherit;
+  }
+  .rec-btn:active { transform: scale(0.96); box-shadow: 0 1px 4px rgba(0,0,0,0.1); }
+  .rec-btn .btn-emoji { font-size: 22px; }
+
+  /* カレンダー */
+  .section { background: #fff; border-radius: 20px; margin: 0 12px 12px; padding: 16px; box-shadow: 0 2px 8px rgba(0,0,0,0.06); }
+  .cal-header { display: flex; align-items: center; justify-content: space-between; margin-bottom: 12px; }
+  .cal-nav { background: none; border: none; font-size: 20px; cursor: pointer; padding: 4px 10px; color: #a07850; border-radius: 8px; }
+  .cal-nav:hover { background: #f5e6d3; }
+  #cal-title { font-size: 15px; font-weight: 700; color: #4a2c0a; }
+  .cal-grid { display: grid; grid-template-columns: repeat(7, 1fr); gap: 2px; }
+  .cal-dow { text-align: center; font-size: 10px; padding: 4px 0; font-weight: 600; }
+  .cal-day {
+    aspect-ratio: 1;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: flex-start;
+    padding-top: 4px;
+    border-radius: 10px;
+    cursor: pointer;
+    font-size: 12px;
+    transition: background 0.1s;
+  }
+  .cal-day:hover { background: #fdf0e0; }
+  .cal-day.today { background: #fff7ed; }
+  .cal-day.selected { background: #0891b2 !important; }
+  .cal-day.selected span { color: #fff !important; }
+
+  /* 日別ログ */
+  #day-label { font-size: 14px; font-weight: 700; color: #4a2c0a; margin-bottom: 10px; }
+  .log-item {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 10px 0;
+    border-bottom: 1px solid #f5ede0;
+  }
+  .log-item:last-child { border-bottom: none; }
+  .log-dot { width: 8px; height: 8px; border-radius: 50%; flex-shrink: 0; }
+  .log-info { flex: 1; display: flex; align-items: center; gap: 8px; }
+  .log-emoji { font-size: 18px; }
+  .log-label { font-size: 14px; font-weight: 600; }
+  .log-time { font-size: 12px; color: #a07850; margin-left: auto; }
+  .del-btn {
+    background: none; border: none; color: #ccc; cursor: pointer;
+    font-size: 13px; padding: 4px; border-radius: 4px;
+  }
+  .del-btn:hover { color: #ef4444; background: #fee2e2; }
+  .empty-day { text-align: center; color: #c4a882; font-size: 13px; padding: 20px 0; }
+
+
+  /* 登録バナー */
+  #reg-banner {
+    display: none;
+    align-items: center;
+    margin: 0 16px 4px;
+    padding: 13px 16px;
+    background: #fff;
+    border-radius: 14px;
+    border-left: 5px solid #f59e0b;
+    font-size: 14px;
+    font-weight: 600;
+    color: #333;
+    box-shadow: 0 3px 12px rgba(0,0,0,0.12);
+    opacity: 0;
+    transform: translateY(-8px);
+    transition: opacity 0.3s, transform 0.3s;
+  }
+  #reg-banner.banner-show { opacity: 1; transform: translateY(0); }
+  #reg-banner.banner-hide { opacity: 0; transform: translateY(-8px); }
+
+  /* カレンダーローディング */
+  #cal-loading {
+    display: none;
+    text-align: center;
+    font-size: 12px;
+    color: #a07850;
+    padding: 6px 0 2px;
+  }
+
+  /* トースト（削除用・小さめ） */
+  #toast {
+    position: fixed;
+    bottom: 24px;
+    left: 50%;
+    transform: translateX(-50%) translateY(10px);
+    background: rgba(30,20,10,0.8);
+    color: #fff;
+    padding: 8px 18px;
+    border-radius: 30px;
+    font-size: 13px;
+    opacity: 0;
+    transition: opacity 0.25s, transform 0.25s;
+    pointer-events: none;
+    white-space: nowrap;
+    z-index: 100;
+  }
+  #toast.show { opacity: 1; transform: translateX(-50%) translateY(0); }
+
+</style>
+</head>
+<body>
+
+<header>
+  <div class="header-icon">🐾</div>
+  <div>
+    <div class="header-title">つくも日誌</div>
+    <div class="header-sub">パピヨン・つくもの記録帳</div>
+  </div>
+</header>
+
+<!-- 登録バナー -->
+<div id="reg-banner"></div>
+
+<!-- 記録ボタン -->
+<div class="btn-grid">
+  <button class="rec-btn" style="background:linear-gradient(135deg,#f59e0b,#d97706)" onclick="window._addRecord('food')">
+    <span class="btn-emoji">🍚</span> ごはん
+  </button>
+  <button class="rec-btn" style="background:linear-gradient(135deg,#78350f,#92400e)" onclick="window._addRecord('poop')">
+    <span class="btn-emoji">💩</span> うんち
+  </button>
+  <button class="rec-btn" style="background:linear-gradient(135deg,#10b981,#059669)" onclick="window._addRecord('walk')">
+    <span class="btn-emoji">🐾</span> さんぽ
+  </button>
+  <button class="rec-btn" style="background:linear-gradient(135deg,#6366f1,#4f46e5)" onclick="window._addRecord('medicine')">
+    <span class="btn-emoji">💊</span> フィラリア薬
+  </button>
+</div>
+
+<!-- カレンダー -->
+<div class="section">
+  <div class="cal-header">
+    <button class="cal-nav" onclick="window._prevMonth()">‹</button>
+    <span id="cal-title"></span>
+    <button class="cal-nav" onclick="window._nextMonth()">›</button>
+  </div>
+  <div id="cal-loading">読み込み中…</div>
+  <div class="cal-grid" id="cal-grid"></div>
+</div>
+
+<!-- 日別ログ -->
+<div class="section">
+  <div id="day-label"></div>
+  <div id="day-list"></div>
+</div>
+
+
+<!-- 日メモ -->
+<div class="section">
+  <div style="font-size:13px;font-weight:700;color:#4a2c0a;margin-bottom:8px">📝 この日のメモ</div>
+  <textarea id="day-memo-area" rows="3"
+    placeholder="自由にメモ（例: 下痢気味、食欲あり、元気すぎ）"
+    style="width:100%;border:1.5px solid #e5d5c0;border-radius:10px;padding:10px 12px;font-size:14px;font-family:inherit;resize:vertical;outline:none;color:#333;line-height:1.6"
+  ></textarea>
+  <div id="memo-save-status" style="font-size:11px;color:#a07850;margin-top:4px;text-align:right"></div>
+</div>
+
+<div id="toast"></div>
+
+</body>
+</html>
