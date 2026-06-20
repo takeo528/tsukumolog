@@ -37,11 +37,17 @@
   let memoSaveTimer = null;
 
   function toDateStr(d) {
+    // ローカル時刻ベースで日付文字列を生成（UTC変換しない）
     return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')}`;
   }
   function toDisplayTime(isoStr) {
     const d = new Date(isoStr);
     return `${String(d.getHours()).padStart(2,'0')}:${String(d.getMinutes()).padStart(2,'0')}`;
+  }
+  function toLocalISOString(d) {
+    // JSTなどローカル時刻でISO文字列を生成
+    const pad = n => String(n).padStart(2, '0');
+    return `${d.getFullYear()}-${pad(d.getMonth()+1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`;
   }
   function dateStrToObj(dateStr) {
     const [y,m,d] = dateStr.split('-').map(Number);
@@ -78,7 +84,7 @@
 
   // ── 記録ボタン（楽観的UI）──
   async function addRecord(category) {
-    const nowIso = new Date().toISOString();
+    const nowIso = toLocalISOString(new Date());
     const timeStr = toDisplayTime(nowIso);
     const dateKey = nowIso.slice(0, 10);
     const cat = CATEGORIES[category];
@@ -118,7 +124,7 @@
     const [,h,m] = match;
     const base = new Date(currentIso);
     base.setHours(parseInt(h), parseInt(m), 0, 0);
-    const newIso = base.toISOString();
+    const newIso = toLocalISOString(base);
 
     const entry = records[dateKey]?.find(r => r.id === id);
     if (entry) entry.timestamp = newIso;
